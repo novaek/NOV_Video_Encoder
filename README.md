@@ -39,3 +39,5 @@ For the moment, the only files i will Upload are :
 - ENCD.cpp : the masterpeace : the code that check for everything said in part 1) .
 - LOD.cpp : the file I use to encode raw HEX values to a file to try ENDC.cpp
 - KGB : the file i use as a test file
+
+### Last notice : for now its just a Windows programme (using User32.dll, and i might patch it later)
