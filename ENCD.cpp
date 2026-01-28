@@ -1,216 +1,214 @@
+#define UNICODE
+#define _UNICODE
+
 #include <windows.h>
 #include <fstream>
 #include <iostream>
-#include <string>
 #include <vector>
+#include <cstring>
 
 
 #pragma comment(lib, "User32.lib")
+#pragma comment(lib, "Gdi32.lib")
+
 
 std::vector<uint16_t> framebuffer;
-int width =0;
-int height = 0;
 std::vector<uint8_t> rgb;
 
 
-void rgb565_to_rgb24(const std::vector<uint16_t>& src, std::vector<uint8_t>& dst, int width,int height)
+int width = 0;
+int height = 0;
+
+
+void rgb565_to_rgb24(const std::vector<uint16_t>& src, std::vector<uint8_t>& dst, int w, int h)
 {
-    dst.resize(width * height * 3);
-
-    for (int i = 0; i < width * height; i++) {
+    dst.resize(w * h * 3);
+    for (int i = 0; i < w * h; i++) {
         uint16_t p = src[i];
-
-        uint8_t r = ((p >> 11) & 0x1F) << 3;
-        uint8_t g = ((p >> 5)  & 0x3F) << 2;
-        uint8_t b = (p & 0x1F) << 3;
-
-        dst[i * 3 + 0] = b;
-        dst[i * 3 + 1] = g;
-        dst[i * 3 + 2] = r;
+        dst[i*3 + 2] = ((p >> 11) & 0x1F) << 3; // R
+        dst[i*3 + 1] = ((p >> 5) & 0x3F) << 2;  // G
+        dst[i*3 + 0] = (p & 0x1F) << 3;         // B
     }
 }
 
-void render_frame(HWND hwnd, const std::vector<uint8_t>& rgb, int width, int height)
+const uint32_t capW = GetSystemMetrics(SM_CXSCREEN);
+const uint32_t capH = GetSystemMetrics(SM_CYSCREEN);
+
+void render_frame(HWND hwnd, const std::vector<uint8_t>& rgb, int w, int h)
 {
-    BITMAPINFO bmi = {};
+    BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height;
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 24;
     bmi.bmiHeader.biCompression = BI_RGB;
 
     HDC hdc = GetDC(hwnd);
-
-    StretchDIBits(hdc,0, 0, width, height, 0, 0, width, height, rgb.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
-
+    StretchDIBits(hdc, 0, 0, w, h, 0, 0, w, h, rgb.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
     ReleaseDC(hwnd, hdc);
 }
 
-
-
-uint16_t read_u16(const std::vector<uint8_t>& data, size_t& offset) {
+uint16_t read_u16(const std::vector<uint8_t>& data, size_t& offset)
+{
     uint16_t v = (data[offset] << 8) | data[offset + 1];
     offset += 2;
     return v;
 }
 
-void codec(std::vector<uint8_t>& data, std::vector<uint16_t>& framebuffer){
-    size_t offset = 0;
+void codec(const std::vector<uint8_t>& data,
+           std::vector<uint16_t>& framebuffer,
+           int width,
+           int height,
+           bool isKeyframe)
+{
+    size_t pixels = size_t(width) * size_t(height);
+    size_t bytes  = pixels * 2;
 
-    uint8_t frame_type = data[offset++];
-    width  = read_u16(data, offset);
-    height = read_u16(data, offset);
+    if (data.size() != bytes)
+        return;
 
-    size_t pixel_count = width * height;
-
-    if (frame_type == 0x00) {
-        framebuffer.resize(pixel_count);
-        for (size_t i = 0; i < pixel_count; i++) {
-            framebuffer[i] = read_u16(data, offset);
-        }
+    if (isKeyframe) {
+        framebuffer.resize(pixels);
+        memcpy(framebuffer.data(), data.data(), bytes);
         return;
     }
 
-    if (frame_type == 0x01) {
+    if (framebuffer.size() != pixels)
+        return;
 
-        size_t cursor = 0;
-        uint16_t chunk_count = read_u16(data, offset);
-
-        for (int c = 0; c < chunk_count; c++) {
-            if (offset +1> data.size()) {
-                std::cerr << "Frame data corrupted\n";
-                return;
-            }
-            uint16_t skip = read_u16(data, offset);
-            cursor += skip;
-            uint16_t change = read_u16(data, offset);
-
-            for (int i = 0; i < change; i++) {
-                uint16_t delta = read_u16(data, offset);
-                if (cursor >= framebuffer.size()) {
-                    std::cerr << "Frame decode overflow\n";
-                    return;
-                }
-                framebuffer[cursor] ^= delta;
-                cursor++;
-            }
-        }
+    for (size_t i = 0; i < bytes; i++) {
+        ((uint8_t*)framebuffer.data())[i] ^= data[i];
     }
 }
 
-void GetDesktopResolution(int& horizontal, int& vertical)
+
+HWND create_window(int w, int h)
 {
-   RECT desktop;
-   const HWND hDesktop = GetDesktopWindow();
-   GetWindowRect(hDesktop, &desktop);
-   horizontal = desktop.right;
-   vertical = desktop.bottom;
+    WNDCLASS wc{};
+    wc.lpfnWndProc = DefWindowProc;
+    wc.hInstance = GetModuleHandle(nullptr);
+    wc.lpszClassName = L"KGB_PLAYER";
+
+    if (!RegisterClass(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS);
+
+
+    HWND hwnd = CreateWindowW(
+        wc.lpszClassName,
+        L"KGB Player",
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        w, h,
+        nullptr, nullptr, wc.hInstance, nullptr
+    );
+
+    if (!hwnd) {
+        MessageBoxW(nullptr, L"Failed to create window", L"Error", MB_ICONERROR);
+    }
+
+    return hwnd;
 }
 
-std::vector<uint8_t> get_info(std::string name){
+std::vector<uint8_t> get_info(const std::string& name)
+{
     std::vector<uint8_t> info;
     std::ifstream input(name, std::ios::binary);
-    if (!input){
-        std::cout << "file not shown" << std::endl;
-        return info;
-    }
-    std::vector<uint8_t> bytes(
-         (std::istreambuf_iterator<char>(input)),
-         (std::istreambuf_iterator<char>()));
+    if (!input) return info;
 
-    if (bytes.size() < 4) {
-        std::cout << "File too small!" << std::endl;
-        return info;
-    }
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+
+    if (bytes.size() < 4) return info;
 
     uint16_t header = (bytes[0] << 8) | bytes[1];
-    std::cout << std::hex << header << std::endl;
-    if (header==0xadda){
-        info.push_back(0xFF);
-        std::cout << "file header correct" << std::endl;
-    }
-    else {
-        info.push_back(0x00);
-        std::cout << "file header incorrect" << std::endl;
-    }
+    info.push_back((header == 0xADDA) ? 0xFF : 0x00);
+    info.push_back(bytes[2]);
+    info.push_back(bytes[3]);
 
-    uint16_t lenght=0;
-    lenght = (uint16_t(bytes[2]) << 8) | (uint16_t(bytes[3])); 
-    std::cout << "\n\n" <<std::hex << static_cast<int>(info[0]) << std::endl;
-    std::cout << "\n size : " << std::dec << static_cast<int>(lenght) << std::endl;
-    int hor=0;
-    int ver = 0;
-    GetDesktopResolution(hor,ver);
-    uint64_t screenPixels = uint64_t(hor) * ver;
-    std::cout << std::dec <<"screen size (pixels): "<< screenPixels << std::endl;
-    uint8_t flag =0x40;
-    std::cout << "flag : " << flag << " :: " << unsigned(flag) << std::endl;
-    int flag_number=0;
-    for (int i=0;i<bytes.size();i++){
-        if (bytes[i]==flag){
-            flag_number+=1;
-        }
-    }
-    std::cout << "number of flag iterations : " << flag_number << std::endl;
-    std::cout << "number of possible images : " << flag_number-2 << std::endl;
-    input.close();
     return info;
+}
 
-} 
-std::vector<int> get_image_index(std::string file){
-    std::vector<int> index={};
-    std::ifstream input(file, std::ios::binary);
-    if (!input){
-        std::cout << "file not shown" << std::endl;
-        return {-2};
+std::vector<uint8_t> get_img_data(const std::string& filename, uint16_t imgIndex)
+{
+    std::ifstream file(filename, std::ios::binary);
+    if (!file) return {};
+
+    uint8_t hdr[2];
+    file.read((char*)hdr, 2);
+    if (hdr[0] != 0xAD || hdr[1] != 0xDA)
+        return {};
+
+    uint8_t fc_be[2];
+    file.read((char*)fc_be, 2);
+    uint16_t frameCount = (fc_be[0] << 8) | fc_be[1];
+
+    if (imgIndex >= frameCount)
+        return {};
+
+    for (uint16_t i = 0; i <= imgIndex; i++) {
+        uint8_t size_be[4];
+        file.read((char*)size_be, 4);
+
+        uint32_t frameSize =(size_be[0] << 24) | (size_be[1]<<16) | (size_be[2]<<8) | size_be[3];
+
+        if (i == imgIndex) {
+            std::vector<uint8_t> frame(frameSize);
+            file.read((char*)frame.data(), frameSize);
+            return frame;
+        }
+
+        file.seekg(frameSize, std::ios::cur);
     }
-    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)),(std::istreambuf_iterator<char>()));
-    for (int i=0; i<bytes.size(); i++){
-        if (bytes[i]==0x40){
-            index.push_back(i);
+
+    return {};
+}
+
+
+int main()
+{   
+    std::string mfs="";
+    std::cin >> mfs;
+    auto HS = get_info(mfs);
+    if (HS.size() < 3) return 1;
+
+    int totalFrames = (HS[1] << 8) | HS[2];
+    if (totalFrames == 0) return 1;
+
+    HWND hwnd = create_window(1280, 720);
+    if (!hwnd) return 1;
+
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    MSG msg{};
+    int frameIndex = 0;
+    DWORD lastTick = GetTickCount();
+
+    while (true) {
+        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT)
+                return 0;
+
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+
+        DWORD now = GetTickCount();
+        if (now - lastTick >= 1000 / 24) {
+            if (frameIndex >= totalFrames)
+            frameIndex = 0; // loop video
+            bool isKeyframe = (frameIndex == 0);
+            auto mp2 = get_img_data(mfs, frameIndex);
+            if (!mp2.empty()) {
+                codec(mp2, framebuffer, capW, capH, isKeyframe);
+                if (!framebuffer.empty()) {
+                    rgb565_to_rgb24(framebuffer, rgb, capW, capH);
+                    render_frame(hwnd, rgb, capW, capH);
+                }
+            }
+
+            frameIndex++;
+            lastTick = now;
         }
     }
-    index.erase(index.begin());
-    index.erase(index.end()-1);
-    for (int z=0; z<index.size(); z++) {
-        std::cout << index[z] << " " << std::endl;
-    }
-    return index;
-
-}
-
-std::vector<uint8_t> get_img_data(std::vector<int> index, int img, std::string file){
-    std::ifstream input(file, std::ios::binary);
-    if (!input){
-        std::cout << "file not shown" << std::endl;
-        return {0x00};
-    }
-    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)),(std::istreambuf_iterator<char>()));
-    int first_index = index[img]+1;
-    int last_index = index[img+1]-1;
-    std::vector<uint8_t> image={}; 
-    for (int data=first_index;data<last_index; data++)
-    {
-        image.push_back(bytes[data]);
-    }
-    return image;
-}
-
-int main() {
-    get_info("KGB");
-    std::vector<int> mp = get_image_index("KGB");
-    int size = mp.size();
-    int h=0;
-    HWND hwnd =GetConsoleWindow();
-    while (size>0){
-        std::vector<uint8_t> mp2 = get_img_data(mp, h,"KGB");
-        codec(mp2, framebuffer);
-        rgb565_to_rgb24(framebuffer,rgb, width, height);
-        render_frame(hwnd, rgb, width, height);
-        h+=1;
-        size-=1;
-        Sleep(1000/24);
-    }
-    h=0;
 }
